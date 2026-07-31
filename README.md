@@ -10,7 +10,7 @@ Whether you are launching a new website feature, validating event tracking after
 
 This repository contains two complementary auditing tools:
 
-### 1. 🔗 UTM Campaign Taxonomy Auditor
+### 1. UTM Campaign Taxonomy Auditor
 **Fixes messy campaign links and prevents broken traffic attribution.**
 
 Marketing links with typos, uppercase letters, or missing details break your reporting. This auditor checks your campaign URLs in bulk, flags problems, and hands back a clean list of corrected links ready to paste.
