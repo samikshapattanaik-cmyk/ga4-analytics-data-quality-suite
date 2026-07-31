@@ -268,10 +268,25 @@ def _clean_type(value):
     return v if v in ("string", "int", "float", "bool", "any") else "any"
 
 
+def _clean_required(value):
+    """
+    Defaults to True (present-by-default) when unspecified, matching prior behavior.
+    Accepts booleans directly (from JSON) or common text forms (from CSV/TSV/Excel).
+    """
+    if value is None or value == "":
+        return True
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("false", "0", "no", "n", "optional"):
+        return False
+    return True
+
+
 def _spec_from_long_records(records):
     """
     records: iterable of dicts with at least event_name + param_name.
-    Optional: scope (event|item), tier, data_type, notes.
+    Optional: scope (event|item), tier, data_type, notes, required.
     """
     spec = OrderedDict()
     for row in records:
@@ -285,10 +300,11 @@ def _spec_from_long_records(records):
         tier = _clean_tier(row.get("tier"))
         dtype = _clean_type(row.get("data_type") or row.get("type"))
         notes = str(row.get("notes") or "").strip()
+        required = _clean_required(row.get("required"))
 
         spec.setdefault(event, {"category": "custom", "params": {}, "items": {}})
         bucket = "items" if scope.startswith("item") else "params"
-        spec[event][bucket][param] = {"tier": tier, "type": dtype, "notes": notes}
+        spec[event][bucket][param] = {"tier": tier, "type": dtype, "notes": notes, "required": required}
     if not spec:
         fail(
             "The tracking plan was read but produced zero usable rows.",
@@ -319,7 +335,8 @@ def load_custom_tracking_plan(path):
         fail(
             f"'{path}' is valid JSON but not in a recognized tracking-plan shape.",
             'Expected either {"events": {...}} (native spec format) or a flat list of '
-            '{"event_name": ..., "param_name": ..., "scope": ..., "tier": ..., "data_type": ...} records.',
+            '{"event_name": ..., "param_name": ..., "scope": ..., "tier": ..., "data_type": ..., '
+            '"required": ...} records.',
         )
 
     if ext in (".csv", ".tsv", ".xlsx", ".xls"):
@@ -339,7 +356,8 @@ def load_custom_tracking_plan(path):
                 f"Tracking plan '{path}' is missing required column(s).",
                 "Expected at least an 'event_name' column and a 'param_name' "
                 "(or 'parameter'/'param') column. Optional columns: 'scope' (event|item), "
-                "'tier' (CRITICAL|WARNING|NOTICE), 'data_type' (string|int|float|bool), 'notes'. "
+                "'tier' (CRITICAL|WARNING|NOTICE), 'data_type' (string|int|float|bool), 'notes', "
+                "'required' (true|false, defaults to true). "
                 f"Columns found: {columns}",
             )
         # Normalize keys to the lowercase names _spec_from_long_records expects.
@@ -861,24 +879,28 @@ def diff_events(observed_events, spec):
                         occurrence, canonical_name, item_spec, item, scope="item", record=record,
                     )
             else:
-                # Event has an item-scoped spec but no items array at all sent — flag once.
-                worst_tier = min((p["tier"] for p in item_spec.values()), key=lambda t: _TIER_RANK[t]) if item_spec else WARNING
-                key = ("missing_items_array", canonical_name)
-                record(
-                    key,
-                    event_name=canonical_name,
-                    severity=worst_tier,
-                    scope="item",
-                    parameter=None,
-                    issue=f"'{canonical_name}' has no items[] array at all, but the tracking plan expects item-scoped parameters.",
-                    expected="A non-empty items[] array.",
-                    observed="items[] missing or empty",
-                    suggested_fix=(
-                        f"Populate the `items[]` array on '{canonical_name}' with at least "
-                        f"{', '.join(item_spec.keys())}."
-                    ),
-                    source_ref=occurrence.get("source_ref"),
-                )
+                # Event has an item-scoped spec but no items array at all sent — flag once,
+                # based only on the item params that are actually required. If every
+                # item-scoped param in the spec is optional, there's nothing to flag.
+                required_item_params = {k: v for k, v in item_spec.items() if v.get("required", True)}
+                if required_item_params:
+                    worst_tier = min((p["tier"] for p in required_item_params.values()), key=lambda t: _TIER_RANK[t])
+                    key = ("missing_items_array", canonical_name)
+                    record(
+                        key,
+                        event_name=canonical_name,
+                        severity=worst_tier,
+                        scope="item",
+                        parameter=None,
+                        issue=f"'{canonical_name}' has no items[] array at all, but the tracking plan expects item-scoped parameters.",
+                        expected="A non-empty items[] array.",
+                        observed="items[] missing or empty",
+                        suggested_fix=(
+                            f"Populate the `items[]` array on '{canonical_name}' with at least "
+                            f"{', '.join(required_item_params.keys())}."
+                        ),
+                        source_ref=occurrence.get("source_ref"),
+                    )
 
     findings_list = list(findings.values())
     findings_list.sort(key=lambda f: (_TIER_RANK[f["severity"]], f["event_name"], f.get("parameter") or ""))
@@ -901,6 +923,13 @@ def _diff_param_scope(occurrence, canonical_event_name, param_spec, observed_par
         found = observed_index.get(norm_param)
 
         if found is None:
+            # required defaults to True when unset — a param with no explicit "required"
+            # is treated as expected-by-default, matching prior behavior for every
+            # existing spec entry. Only an explicit required: false skips the "missing"
+            # finding entirely, since some params (e.g. quantity on view_item) are
+            # legitimately optional and shouldn't nag on every audit that omits them.
+            if not rules.get("required", True):
+                continue
             key = ("missing_param", canonical_event_name, scope, spec_param)
             record(
                 key,
