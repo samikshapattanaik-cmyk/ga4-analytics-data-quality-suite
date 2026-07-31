@@ -44,6 +44,20 @@ Both tools organize findings into three simple levels so you know what to fix fi
 
 ---
 
+Installation — upload to Claude as a Skill
+Download this repository as a ZIP.
+
+On GitHub: click Code → Download ZIP.
+
+Make sure the ZIP contains the whole ga4-schema-tracking-auditor/ folder — SKILL.md, the scripts/ folder, and the references/ folder all need to travel together. Don't upload just SKILL.md on its own; the skill needs its script and reference specs alongside it to function.
+
+Go to Claude → Settings → Capabilities → Skills (in claude.ai, or the equivalent Skills section of the Claude app you're using).
+
+Upload the ZIP file using the "Add skill" / "Upload skill" option. Claude will unpack it and register ga4-schema-tracking-auditor as an available skill.
+
+Enable the skill for the conversation or project where you want to use it, if your client requires skills to be toggled on per-chat.
+
+---
 ## Repository Structure
 
 ```text
