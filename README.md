@@ -58,6 +58,10 @@ Upload the ZIP file using the "Add skill" / "Upload skill" option. Claude will u
 Enable the skill for the conversation or project where you want to use it, if your client requires skills to be toggled on per-chat.
 
 ---
+
+<img width="1280" height="720" alt="screen-capture-ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/c79f7aa0-3644-4aa6-90c0-a3c4192707e6" />
+
+---
 ## Repository Structure
 
 ```text
@@ -71,3 +75,6 @@ ga4_analytics-data-quality-suite/
     ├── SKILL.md                          # Auditor guide & instructions
     ├── scripts/validate_schema.py        # Event tracking checker engine
     └── references/                       # Standard GA4 event specifications
+
+
+
