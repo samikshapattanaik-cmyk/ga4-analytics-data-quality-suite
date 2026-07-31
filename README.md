@@ -6,7 +6,7 @@ Whether you are trying to figure out why traffic is landing in **Unassigned**, c
 
 ---
 
-## 📌 What’s Included?
+## What’s Included?
 
 This repository contains two complementary auditing tools:
 
@@ -21,7 +21,7 @@ Marketing links with typos, uppercase letters, or missing details break your rep
 
 ---
 
-### 2. 📊 GA4 Schema & Tracking Auditor
+### 2. GA4 Schema & Tracking Auditor
 **Checks if your website events and ecommerce tracking match your plan.**
 
 Compares actual website data (from Google Tag Manager, BigQuery, or GA4 exports) against your tracking blueprint or standard GA4 guidelines.
@@ -44,7 +44,7 @@ Both tools organize findings into three simple levels so you know what to fix fi
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 ga4_analytics-data-quality-suite/
