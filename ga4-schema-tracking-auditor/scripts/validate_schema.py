@@ -1123,14 +1123,94 @@ def _diff_occurrence(occurrence, spec_index):
     return canonical_name, issues
 
 
+# Known common misnomers for standard GA4 parameter names, mapping a normalized
+# wrong name to the normalized correct one. Deliberately a curated list rather than
+# generic fuzzy-matching: plain string-similarity scoring (e.g. difflib) rates
+# 'item_name' vs 'item_id' at 0.62 and 'item_name' vs 'item_category' at 0.64 —
+# both close to or higher than 'item_code' vs 'item_id' at 0.75 — so a similarity
+# cutoff loose enough to catch real typos would just as readily misidentify one
+# genuinely distinct, correctly-named GA4 field as a typo of another whenever a
+# sparse custom plan simply doesn't declare it. A curated list trades recall
+# (it won't catch every possible typo) for precision (it won't invent a
+# misleading "did you mean" for a parameter that was actually spelled right).
+_KNOWN_PARAM_ALIASES = {
+    "itemcode": "item_id",
+    "productid": "item_id",
+    "prodid": "item_id",
+    "sku": "item_id",
+    "itemsku": "item_id",
+    "producttitle": "item_name",
+    "productname": "item_name",
+    "itemtitle": "item_name",
+    "qty": "quantity",
+    "itemqty": "quantity",
+    "itemprice": "price",
+    "unitprice": "price",
+    "txnid": "transaction_id",
+    "orderid": "transaction_id",
+    "ordernumber": "transaction_id",
+    "transactionnumber": "transaction_id",
+    "curr": "currency",
+    "amount": "value",
+    "total": "value",
+    "revenue": "value",
+    "pageurl": "page_location",
+    "pagepath": "page_location",
+    "url": "page_location",
+    "searchquery": "search_term",
+    "query": "search_term",
+}
+
+
+def _find_unrecognized_param_issues(canonical_event_name, param_spec, observed_index, matched_norm_keys, scope):
+    """
+    Flag observed keys that never matched any spec parameter and are a known
+    common misnomer for one the plan actually declares — e.g. item_code when
+    the plan expects item_id. Only fires when the corrected name is genuinely
+    part of the active spec, so the suggestion is always actionable right now.
+    """
+    issues = []
+    spec_norm_to_name = {normalize_key(p): p for p in param_spec}
+    for norm_key, (observed_name, _observed_value) in observed_index.items():
+        if norm_key in matched_norm_keys:
+            continue
+        alias_target_raw = _KNOWN_PARAM_ALIASES.get(norm_key)
+        if alias_target_raw is None:
+            continue
+        alias_target_norm = normalize_key(alias_target_raw)
+        if alias_target_norm not in spec_norm_to_name:
+            continue
+        canonical_target = spec_norm_to_name[alias_target_norm]
+        where = "each items[] entry" if scope == "item" else "the event payload"
+        issues.append({
+            "key": ("unrecognized_param", canonical_event_name, scope, observed_name),
+            "kind": "unrecognized_param",
+            "event_name": canonical_event_name,
+            "severity": NOTICE,
+            "scope": scope,
+            "parameter": observed_name,
+            "issue": (
+                f"'{observed_name}' isn't a standard GA4 parameter — did you mean '{canonical_target}'? "
+                f"Custom keys inside {'items[]' if scope == 'item' else 'the event payload'} that don't match "
+                f"a real GA4 field are silently ignored by standard reports."
+            ),
+            "expected": f"'{canonical_target}' (closest recognized parameter)",
+            "suggested_fix": f"Rename `{observed_name}` to `{canonical_target}` in {where} — GA4 only recognizes the standard field name.",
+        })
+    return issues
+
+
 def _diff_param_scope(canonical_event_name, param_spec, observed_params, scope):
     """Pure per-occurrence, per-scope diff. Returns a list of issue dicts."""
     issues = []
     observed_index = {normalize_key(k): (k, v) for k, v in (observed_params or {}).items()}
+    matched_norm_keys = set()
 
     for spec_param, rules in param_spec.items():
         norm_param = normalize_key(spec_param)
         found = observed_index.get(norm_param)
+        if found is not None:
+            matched_norm_keys.add(norm_param)
 
         if found is None:
             # required defaults to True when unset — a param with no explicit "required"
@@ -1195,6 +1275,9 @@ def _diff_param_scope(canonical_event_name, param_spec, observed_params, scope):
                 "_observed_value": observed_value,  # internal only, used to build merged fix blocks; stripped before output
             })
 
+    issues.extend(
+        _find_unrecognized_param_issues(canonical_event_name, param_spec, observed_index, matched_norm_keys, scope)
+    )
     return issues
 
 
@@ -1402,19 +1485,26 @@ _SEVERITY_FILL_COLORS = {
     NOTICE: "D1ECF1",    # light blue
 }
 
-_EXCEL_HEADERS = ["Severity", "Event", "Occurrences Affected", "Issues", "Suggested Fix"]
-_EXCEL_COLUMN_WIDTHS = [10, 20, 12, 60, 60]
+_EXCEL_HEADERS = ["Severity", "Event", "Occurrences Affected", "Issue", "Suggested Fix"]
+_EXCEL_COLUMN_WIDTHS = [11, 18, 12, 60, 55]
+_EXCEL_ROW_LINE_HEIGHT = 15  # points per wrapped line, used to reserve enough row height explicitly
 
 
 def write_excel_findings(event_reports, path):
     """
-    Write the aggregated per-event-pattern reports directly to an .xlsx workbook —
-    one row per distinct (event, issue-pattern) combination, matching the report
-    layer rather than the fully granular per-parameter findings list. This is
-    entirely optional — the JSON output already contains both views, and a calling
-    Claude session can always build a nicer-formatted workbook itself. This exists
-    for standalone/non-interactive use (e.g. a scheduled job in this repo's broader
-    data-quality suite) where nothing downstream will convert the JSON for you.
+    Write the aggregated per-event-pattern reports directly to an .xlsx workbook.
+    Each individual issue gets its own row (rather than cramming a whole event's
+    issues into one newline-joined cell), with the Event / Occurrences Affected /
+    Suggested Fix columns merged vertically across that event's rows — this keeps
+    every cell's content to a single short block, since some lightweight previewers
+    (including in-chat file viewers) don't reliably auto-size row height for wrapped
+    multi-line cells, and long wrapped text silently gets clipped in those rather than
+    actually wrapping. Row heights are also set explicitly, rather than left to
+    auto-fit, for the same reason. This is entirely optional — the JSON output already
+    contains both views, and a calling Claude session can always build a nicer-formatted
+    workbook itself. This exists for standalone/non-interactive use (e.g. a scheduled
+    job in this repo's broader data-quality suite) where nothing downstream converts
+    the JSON for you.
 
     Only imports openpyxl when actually called, so requesting plain JSON output
     never requires installing anything beyond the standard library.
@@ -1422,6 +1512,7 @@ def write_excel_findings(event_reports, path):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
     except ImportError:
         fail(
             "openpyxl is required to write an Excel findings workbook (--excel-output) but is not installed.",
@@ -1436,30 +1527,62 @@ def write_excel_findings(event_reports, path):
     ws.append(_EXCEL_HEADERS)
     for cell in ws[1]:
         cell.font = Font(bold=True)
+    ws.row_dimensions[1].height = 18
 
-    wrap = Alignment(wrap_text=True, vertical="top")
+    top_left = Alignment(vertical="top", wrap_text=False)
+    top_wrap = Alignment(vertical="top", wrap_text=True)
+
     for report in event_reports:
-        issues_text = "\n".join(
-            f"[{i['severity']}] {i['scope']}/{i['parameter'] or '-'}: {i['issue']}" for i in report["issues"]
-        )
-        ws.append([
-            report.get("severity", ""),
-            report.get("event_name", ""),
-            report.get("occurrences_affected", ""),
-            issues_text,
-            report.get("suggested_fix", ""),
-        ])
-        row = ws.max_row
-        for col in range(1, len(_EXCEL_HEADERS) + 1):
-            ws.cell(row=row, column=col).alignment = wrap
-        fill_color = _SEVERITY_FILL_COLORS.get(report.get("severity"))
-        if fill_color:
-            ws.cell(row=row, column=1).fill = PatternFill(
-                start_color=fill_color, end_color=fill_color, fill_type="solid"
+        issues = report["issues"] or [{
+            "severity": report["severity"], "scope": "-", "parameter": None, "issue": "(no individual issues recorded)"
+        }]
+        fix_text = report.get("suggested_fix", "") or ""
+        start_row = ws.max_row + 1
+
+        for idx, issue in enumerate(issues):
+            ws.append([
+                issue["severity"],
+                report["event_name"] if idx == 0 else None,
+                report["occurrences_affected"] if idx == 0 else None,
+                f"[{issue['scope']}] {issue['parameter'] or '-'}: {issue['issue']}",
+                fix_text if idx == 0 else None,
+            ])
+            row = ws.max_row
+            ws.cell(row=row, column=1).alignment = top_left
+            ws.cell(row=row, column=2).alignment = top_left
+            ws.cell(row=row, column=3).alignment = top_left
+            ws.cell(row=row, column=4).alignment = top_wrap
+            ws.cell(row=row, column=5).alignment = top_wrap
+            fill_color = _SEVERITY_FILL_COLORS.get(issue["severity"])
+            if fill_color:
+                ws.cell(row=row, column=1).fill = PatternFill(
+                    start_color=fill_color, end_color=fill_color, fill_type="solid"
+                )
+            # Reserve enough height for this row's own Issue text (roughly one line
+            # per ~90 chars at the Issue column's width) even before considering the
+            # merged Suggested Fix block below.
+            issue_lines_needed = max(1, -(-len(issue["issue"]) // 90))
+            ws.row_dimensions[row].height = max(
+                ws.row_dimensions[row].height or 0, issue_lines_needed * _EXCEL_ROW_LINE_HEIGHT, 15
             )
 
+        end_row = ws.max_row
+        if end_row > start_row:
+            ws.merge_cells(start_row=start_row, end_row=end_row, start_column=2, end_column=2)
+            ws.merge_cells(start_row=start_row, end_row=end_row, start_column=3, end_column=3)
+            ws.merge_cells(start_row=start_row, end_row=end_row, start_column=5, end_column=5)
+
+        # Spread the height the merged Suggested Fix block needs across its group's
+        # rows, on top of whatever each row already reserved for its own Issue text —
+        # set explicitly rather than relying on the previewer to auto-fit a wrapped cell.
+        fix_lines_needed = fix_text.count("\n") + 1
+        total_rows_in_group = end_row - start_row + 1
+        extra_height_per_row = (fix_lines_needed * _EXCEL_ROW_LINE_HEIGHT) / total_rows_in_group
+        for r in range(start_row, end_row + 1):
+            ws.row_dimensions[r].height = max(ws.row_dimensions[r].height or 0, extra_height_per_row)
+
     for i, width in enumerate(_EXCEL_COLUMN_WIDTHS, start=1):
-        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+        ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = "A2"
 
     try:
