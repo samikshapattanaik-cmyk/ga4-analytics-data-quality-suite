@@ -1,1 +1,16 @@
-
+id,url
+1,https://www.example.com/product?utm_source=google&utm_medium=cpc&utm_campaign=summer_sale
+2,https://www.example.com/landing?utm_source=Facebook&utm_medium=paid-social&utm_campaign=q3_launch
+3,https://www.example.com/promo?utm_source=facebook&utm_medium=paidsocial&utm_campaign=q3_launch
+4,https://www.example.com/signup?utm_source={source_name}&utm_medium=email&utm_campaign=welcome_series
+5,https://www.example.com/deal?utm_source=bing&utm_medium=ppc&utm_campaign=brand_terms
+6,https://www.example.com/newsletter?utm_source=internal&utm_medium=e-mail&utm_campaign=august_digest
+7,https://www.example.com/webinar?utm_source=linkedin&utm_medium=social&utm_campaign=%2520product_demo
+8,https://www.example.com/event?utm_source=partner&utm_medium=referral&utm_campaign={{campaign_name}}
+9,https://www.example.com/download?utm_source=google&utm_campaign=whitepaper_2026
+10,https://www.example.com/trial?utm_source=Instagram&utm_medium=Paid-Social&utm_campaign=Fall_Trial
+11,https://www.example.com/blog?utm_source=twitter&utm_medium=social&utm_campaign=blog_promo
+12,www.example.com/broken?utm_source=google&utm_medium=cpc&utm_campaign=missing_scheme
+13,https://www.example.com/offer?utm_medium=cpc&utm_campaign=no_source_test
+14,https://www.example.com/gated-content?utm_source=email&utm_medium=email&utm_campaign=<<campaign>>
+15,https://www.example.com/store?utm_source=affiliate_network&utm_medium=aff&utm_campaign=holiday_push
