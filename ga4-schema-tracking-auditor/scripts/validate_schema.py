@@ -3,10 +3,10 @@
 validate_schema.py — GA4 Schema & Tracking Auditor core engine.
 
 Compares an OBSERVED GA4 data export (BigQuery export, GA4 Data API pull, GTM
-Preview JSON, or a CSV/Excel/Google-Sheets export) against a TRACKING PLAN
-(either a user-supplied spec, or the bundled default in
-references/ga4-default-spec.json) and emits structured JSON findings tiered
-into CRITICAL / WARNING / NOTICE.
+Preview JSON, flat gtag.js-style event capture, or a CSV/Excel/Google-Sheets
+export) against a TRACKING PLAN (either a user-supplied spec, or the bundled
+default in references/ga4-default-spec.json) and emits structured JSON findings
+tiered into CRITICAL / WARNING / NOTICE.
 
 This script never invents data. If a file can't be parsed, or a required
 dependency is missing, it stops and prints a clear, human-readable error to
@@ -23,6 +23,17 @@ Usage:
     python validate_schema.py --observed export.csv --format tabular
     python validate_schema.py --observed export.jsonl --tracking-plan plan.json --output findings.json
     python validate_schema.py --observed export.json --output findings.json --excel-output findings.xlsx
+
+Output JSON shape:
+    {
+      "summary": {...},
+      "findings": [...],       # granular, one entry per (event, scope, parameter, issue type),
+                                # deduplicated across occurrences with an occurrences_affected count.
+                                # This is the full-detail view for programmatic consumers.
+      "event_reports": [...]   # one entry per distinct (event, issue-pattern) combination, with
+                                # every issue for that pattern grouped together and a single merged
+                                # dataLayer.push fix block. This is the view meant for a human report.
+    }
 
 Exit codes:
     0 = ran successfully (findings may or may not be empty)
@@ -163,6 +174,122 @@ def types_compatible(expected_type, observed_value):
 
 
 # ---------------------------------------------------------------------------
+# Tracking-plan tier/required inference — the 3-layer fallback
+# ---------------------------------------------------------------------------
+#
+# A custom tracking plan can specify tier/required explicitly, but most
+# real-world tracking plans (marketing-authored Sheets/Excel docs) don't have
+# those columns at all — they just have a free-text description/notes column.
+# Rather than defaulting every unspecified parameter to "WARNING, required"
+# (which floods the report with noise for perfectly legitimate optional
+# fields like `coupon` or `affiliation`), tier/required are resolved through
+# three layers, in priority order:
+#
+#   1. Explicit `tier`/`required` columns in the plan itself, if present.
+#   2. A matching event+parameter entry in the bundled default GA4 spec,
+#      borrowing its tier/required — this is real curated data, not a guess.
+#   3. Cautious keyword inference from the notes/description column, as a
+#      last resort for parameters with no match anywhere else.
+#
+# Every parameter is tagged with a `tier_source` string recording exactly
+# which layer(s) supplied its tier/required, so the least-trustworthy layer
+# (3) is always inspectable rather than silently indistinguishable from an
+# explicit column value.
+
+_NEGATION_OR_OPTIONAL_PATTERN = re.compile(
+    r"\boptional\b|\bnot\s+required\b|\bnot\s+mandatory\b|\bisn.t\s+required\b|\bno\s+longer\s+required\b",
+    re.IGNORECASE,
+)
+_REQUIRED_KEYWORD_PATTERN = re.compile(r"\b(required|mandatory)\b", re.IGNORECASE)
+_CRITICAL_SEVERITY_KEYWORD_PATTERN = re.compile(
+    r"\b(critical|high[\s-]impact|breaks?\s+(reporting|core|revenue)|revenue\s+impact|duplicate\s+revenue)\b",
+    re.IGNORECASE,
+)
+
+
+def _infer_required_and_tier_from_notes(notes):
+    """
+    Best-effort layer 3 of the tracking-plan fallback. Returns (required, tier),
+    each either a resolved value or None if nothing recognizable was found.
+    Deliberately conservative: only acts on unambiguous keywords, and checks for
+    negation/"optional" first so a note like "Not required for guest checkout"
+    doesn't get misread as a required-field signal.
+    """
+    if not notes:
+        return None, None
+    text = str(notes)
+    if _NEGATION_OR_OPTIONAL_PATTERN.search(text):
+        return False, None
+    if _REQUIRED_KEYWORD_PATTERN.search(text):
+        tier = CRITICAL if _CRITICAL_SEVERITY_KEYWORD_PATTERN.search(text) else None
+        return True, tier
+    return None, None
+
+
+def _resolve_spec_fallbacks(spec, default_spec):
+    """
+    Fill in tier/required for every parameter in a custom, long-format tracking
+    plan (built from CSV/TSV/Excel or a flat JSON record list) using the 3-layer
+    fallback described above. Mutates and returns `spec`.
+
+    Not applied to the native `{"events": {...}}` JSON shape — choosing that
+    format is itself a signal the author is writing the fully-specified schema
+    directly and doesn't need inference layered on top.
+    """
+    default_index = {normalize_key(k): v for k, v in default_spec.items()}
+
+    for event_name, entry in spec.items():
+        default_entry = default_index.get(normalize_key(event_name))
+        for bucket in ("params", "items"):
+            default_bucket = (default_entry or {}).get(bucket, {})
+            default_bucket_index = {normalize_key(k): v for k, v in default_bucket.items()}
+
+            for param_name, rules in entry[bucket].items():
+                explicit_tier = rules.pop("_explicit_tier", None)
+                explicit_required = rules.pop("_explicit_required", None)
+                notes = rules.get("notes", "")
+
+                tier = explicit_tier
+                required = explicit_required
+                sources = []
+                if explicit_tier is not None:
+                    sources.append("tier:explicit")
+                if explicit_required is not None:
+                    sources.append("required:explicit")
+
+                if tier is None or required is None:
+                    default_rules = default_bucket_index.get(normalize_key(param_name))
+                    if default_rules:
+                        if tier is None:
+                            tier = default_rules.get("tier")
+                            sources.append("tier:default_spec")
+                        if required is None:
+                            required = default_rules.get("required", True)
+                            sources.append("required:default_spec")
+
+                if tier is None or required is None:
+                    inferred_required, inferred_tier = _infer_required_and_tier_from_notes(notes)
+                    if required is None and inferred_required is not None:
+                        required = inferred_required
+                        sources.append("required:notes_inferred")
+                    if tier is None and inferred_tier is not None:
+                        tier = inferred_tier
+                        sources.append("tier:notes_inferred")
+
+                if tier is None:
+                    tier = WARNING
+                    sources.append("tier:default_fallback")
+                if required is None:
+                    required = True
+                    sources.append("required:default_fallback")
+
+                rules["tier"] = tier
+                rules["required"] = required
+                rules["tier_source"] = "; ".join(sources)
+    return spec
+
+
+# ---------------------------------------------------------------------------
 # Tracking plan loading
 # ---------------------------------------------------------------------------
 
@@ -258,35 +385,40 @@ def _read_excel_rows(path):
     return records, list(df.columns)
 
 
-def _clean_tier(value):
-    v = str(value).strip().upper() if value not in (None, "") else "WARNING"
-    return v if v in (CRITICAL, WARNING, NOTICE) else WARNING
-
-
 def _clean_type(value):
     v = str(value).strip().lower() if value not in (None, "") else "any"
     return v if v in ("string", "int", "float", "bool", "any") else "any"
 
 
-def _clean_required(value):
-    """
-    Defaults to True (present-by-default) when unspecified, matching prior behavior.
-    Accepts booleans directly (from JSON) or common text forms (from CSV/TSV/Excel).
-    """
-    if value is None or value == "":
-        return True
+def _parse_explicit_tier(value):
+    """Returns None (unset) rather than a default, so the fallback chain knows to keep looking."""
+    if value in (None, ""):
+        return None
+    v = str(value).strip().upper()
+    return v if v in (CRITICAL, WARNING, NOTICE) else None
+
+
+def _parse_explicit_required(value):
+    """Returns None (unset) rather than a default, so the fallback chain knows to keep looking."""
+    if value in (None, ""):
+        return None
     if isinstance(value, bool):
         return value
     s = str(value).strip().lower()
     if s in ("false", "0", "no", "n", "optional"):
         return False
-    return True
+    if s in ("true", "1", "yes", "y", "required"):
+        return True
+    return None
 
 
 def _spec_from_long_records(records):
     """
     records: iterable of dicts with at least event_name + param_name.
     Optional: scope (event|item), tier, data_type, notes, required.
+
+    tier/required are kept possibly-None here (not yet defaulted) — the 3-layer
+    fallback in _resolve_spec_fallbacks fills them in afterward.
     """
     spec = OrderedDict()
     for row in records:
@@ -297,14 +429,19 @@ def _spec_from_long_records(records):
         if not param:
             continue
         scope = str(row.get("scope") or "event").strip().lower()
-        tier = _clean_tier(row.get("tier"))
+        explicit_tier = _parse_explicit_tier(row.get("tier"))
         dtype = _clean_type(row.get("data_type") or row.get("type"))
-        notes = str(row.get("notes") or "").strip()
-        required = _clean_required(row.get("required"))
+        notes = str(row.get("notes") or row.get("description") or row.get("description / when it fires") or "").strip()
+        explicit_required = _parse_explicit_required(row.get("required"))
 
         spec.setdefault(event, {"category": "custom", "params": {}, "items": {}})
         bucket = "items" if scope.startswith("item") else "params"
-        spec[event][bucket][param] = {"tier": tier, "type": dtype, "notes": notes, "required": required}
+        spec[event][bucket][param] = {
+            "type": dtype,
+            "notes": notes,
+            "_explicit_tier": explicit_tier,
+            "_explicit_required": explicit_required,
+        }
     if not spec:
         fail(
             "The tracking plan was read but produced zero usable rows.",
@@ -326,12 +463,14 @@ def load_custom_tracking_plan(path):
         except json.JSONDecodeError as e:
             fail(f"Could not parse '{path}' as JSON: {e}",
                  "Check for a trailing comma or unclosed bracket, or export the plan as CSV instead.")
-        # Two shapes accepted: {"events": {...}} matching our native spec shape,
-        # or a flat list of long-format records.
+        # Two shapes accepted: {"events": {...}} matching our native spec shape
+        # (taken as fully-specified, no fallback inference applied), or a flat
+        # list of long-format records (fallback inference applied, same as CSV/Excel).
         if isinstance(raw, dict) and "events" in raw:
             return raw["events"]
         if isinstance(raw, list):
-            return _spec_from_long_records(raw)
+            spec = _spec_from_long_records(raw)
+            return _resolve_spec_fallbacks(spec, load_default_spec())
         fail(
             f"'{path}' is valid JSON but not in a recognized tracking-plan shape.",
             'Expected either {"events": {...}} (native spec format) or a flat list of '
@@ -349,22 +488,37 @@ def load_custom_tracking_plan(path):
 
         columns = [str(c).strip() for c in columns]
         cols_lower = {c.lower(): c for c in columns}
-        if "event_name" not in cols_lower or not any(
-            k in cols_lower for k in ("param_name", "parameter", "param")
-        ):
+        has_param_col = any(
+            k in cols_lower for k in ("param_name", "parameter", "param", "parameter_name")
+        )
+        if "event_name" not in cols_lower or not has_param_col:
             fail(
                 f"Tracking plan '{path}' is missing required column(s).",
                 "Expected at least an 'event_name' column and a 'param_name' "
-                "(or 'parameter'/'param') column. Optional columns: 'scope' (event|item), "
-                "'tier' (CRITICAL|WARNING|NOTICE), 'data_type' (string|int|float|bool), 'notes', "
-                "'required' (true|false, defaults to true). "
+                "(or 'parameter'/'param'/'parameter_name') column. Optional columns: "
+                "'scope'/'parameter_scope' (event|item), 'tier' (CRITICAL|WARNING|NOTICE), "
+                "'data_type'/'parameter_type' (string|int|float|bool), 'notes'/'description', "
+                "'required' (true|false). Any of tier/required/notes may be omitted entirely — "
+                "missing tier/required are inferred from the bundled default GA4 spec and, failing "
+                "that, cautiously from the notes/description text. "
                 f"Columns found: {columns}",
             )
-        # Normalize keys to the lowercase names _spec_from_long_records expects.
+        # Normalize keys to the lowercase names _spec_from_long_records expects,
+        # including a couple of real-world column-name variants (e.g. a plan
+        # authored with 'parameter_name'/'parameter_scope'/'parameter_type'
+        # instead of 'param_name'/'scope'/'data_type').
         normalized = []
         for row in records:
-            normalized.append({str(k).strip().lower(): v for k, v in row.items()})
-        return _spec_from_long_records(normalized)
+            norm_row = {str(k).strip().lower(): v for k, v in row.items()}
+            if "param_name" not in norm_row and "parameter_name" in norm_row:
+                norm_row["param_name"] = norm_row["parameter_name"]
+            if "scope" not in norm_row and "parameter_scope" in norm_row:
+                norm_row["scope"] = norm_row["parameter_scope"]
+            if "data_type" not in norm_row and "parameter_type" in norm_row:
+                norm_row["data_type"] = norm_row["parameter_type"]
+            normalized.append(norm_row)
+        spec = _spec_from_long_records(normalized)
+        return _resolve_spec_fallbacks(spec, load_default_spec())
 
     fail(
         f"Unrecognized tracking plan file type '{ext}'.",
@@ -393,7 +547,8 @@ def detect_and_load_observed(path, format_override=None):
             fail(
                 f"Unrecognized observed-data file type '{ext}'.",
                 "Supported formats: BigQuery JSON/JSONL export (.json/.jsonl), GTM Preview JSON (.json), "
-                "GA4 Data API JSON pull (.json), or a CSV/TSV/Excel/Google Sheets export (.csv/.tsv/.xlsx/.xls). "
+                "GA4 Data API JSON pull (.json), flat gtag.js-style event capture (.json), or a "
+                "CSV/TSV/Excel/Google Sheets export (.csv/.tsv/.xlsx/.xls). "
                 "Pass --format to force one explicitly if auto-detection guesses wrong.",
             )
 
@@ -403,9 +558,11 @@ def detect_and_load_observed(path, format_override=None):
         return _load_ga4_api_json(path), fmt
     if fmt == "gtm_preview_json":
         return _load_gtm_preview_json(path), fmt
+    if fmt == "flat_json":
+        return _load_flat_json(path, ext), fmt
     if fmt == "tabular":
         return _load_tabular(path, ext), fmt
-    fail(f"Unknown --format override '{fmt}'. Expected one of: bq_json, ga4_api_json, gtm_preview_json, tabular.")
+    fail(f"Unknown --format override '{fmt}'. Expected one of: bq_json, ga4_api_json, gtm_preview_json, flat_json, tabular.")
 
 
 def _read_json_or_jsonl(path, ext):
@@ -450,21 +607,31 @@ def _sniff_json_shape(path, ext):
             sample = parsed
 
     if isinstance(sample, dict):
-        if "event_params" in sample or "event_name" in sample and "items" in sample:
-            return "bq_json"
+        # Order matters: check the most structurally-specific shapes first.
         if "event_params" in sample:
+            # Genuine BigQuery export rows always carry an event_params array
+            # (even if empty) — that's the reliable signal for this shape,
+            # not just the presence of "event_name".
             return "bq_json"
         if "event" in sample and ("ecommerce" in sample or "gtm.uniqueEventId" in sample or "gtm.start" in str(sample)):
             return "gtm_preview_json"
         if "event" in sample:
+            # A flat dataLayer-style push: {"event": "add_to_cart", ...flat params...}
             return "gtm_preview_json"
         if "event_name" in sample:
-            return "bq_json"
+            # Flat shape with no event_params/ecommerce wrapper at all — params and
+            # items sit directly on the row. This is the natural output of many
+            # lightweight capture tools (e.g. a browser extension or script that
+            # intercepts gtag('event', name, paramsObj) calls and logs them as-is),
+            # and is NOT the same as a real BigQuery export just because it also
+            # happens to have an "event_name" key.
+            return "flat_json"
 
     fail(
         f"Could not confidently auto-detect the JSON structure of '{path}'.",
         "Pass --format explicitly: bq_json (BigQuery export rows with event_params/items), "
-        "gtm_preview_json (GTM Preview / dataLayer dump), or ga4_api_json (GA4 Data API pull with rows/dimensionHeaders).",
+        "gtm_preview_json (GTM Preview / dataLayer dump), ga4_api_json (GA4 Data API pull with "
+        "rows/dimensionHeaders), or flat_json (flat {event_name, ...params, items} objects).",
     )
 
 
@@ -587,6 +754,56 @@ def _load_gtm_preview_json(path):
         fail(
             f"'{path}' parsed as JSON but no entries contained an 'event' key.",
             "Confirm this is a GTM Preview / dataLayer export where each push has an 'event' field.",
+        )
+    return events
+
+
+# --- Flat gtag.js-style event capture --------------------------------------
+
+def _load_flat_json(path, ext):
+    """
+    Flat JSON shape: each row is {"event_name": ..., <param>: value, ..., "items": [...]}
+    with no event_params/ecommerce wrapper — params and items sit directly on the
+    row. Common output of tools that intercept and log raw gtag('event', name, params)
+    calls (e.g. a QA browser extension or console override), rather than reading a
+    BigQuery export or a GTM Preview panel.
+    """
+    rows = _read_json_or_jsonl(path, ext)
+    if isinstance(rows, dict):
+        rows = rows.get("rows") or rows.get("data") or rows.get("events") or [rows]
+    if not isinstance(rows, list):
+        fail(f"Expected '{path}' to contain a list of flat event objects.")
+
+    events = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        event_name = row.get("event_name") or row.get("event")
+        if not event_name:
+            continue
+        items = []
+        params = {}
+        for k, v in row.items():
+            if k in ("event_name", "event"):
+                continue
+            if k == "items" and isinstance(v, list):
+                items = [dict(it) for it in v if isinstance(it, dict)]
+                continue
+            if isinstance(v, (dict, list)):
+                continue  # skip unexpected nested structures we don't have a defined shape for
+            params[k] = v
+        events.append({
+            "event_name": event_name,
+            "source_ref": f"row {i + 1}",
+            "params": params,
+            "items": items,
+        })
+
+    if not events:
+        fail(
+            f"'{path}' parsed as JSON but no entries contained a usable 'event_name'/'event' key.",
+            "Confirm this is a flat event export where each object has event_name plus its "
+            "parameters directly as keys (and optionally an items[] array).",
         )
     return events
 
@@ -765,6 +982,18 @@ def _load_tabular(path, ext):
 # ---------------------------------------------------------------------------
 # Diff engine
 # ---------------------------------------------------------------------------
+#
+# Runs in three passes:
+#   1. Compute raw per-occurrence issues (every issue tagged with a `kind`,
+#      a stable dedup `key`, and — internally only — the actual observed
+#      value where relevant for building fix blocks later).
+#   2. Deduplicate those across all occurrences into the granular `findings`
+#      list (unchanged schema/behavior from before): one entry per distinct
+#      (event, scope, parameter, issue kind), with an occurrences_affected count.
+#   3. Group occurrences by (event, exact set of issues triggered) into
+#      `event_reports`: one row per distinct breakage pattern, each carrying
+#      every issue for that pattern plus a single merged dataLayer.push fix
+#      block built from a representative real occurrence.
 
 def build_spec_index(spec):
     """normalized event name -> (canonical_event_name, spec_entry)"""
@@ -811,111 +1040,92 @@ def _try_unquote_number(value):
         return value
 
 
-def diff_events(observed_events, spec):
-    spec_index = build_spec_index(spec)
-    # findings keyed for de-duplication across many repeated occurrences of the same issue
-    findings = OrderedDict()
-    total_occurrences = len(observed_events)
-    events_seen = set()
+def _diff_occurrence(occurrence, spec_index):
+    """
+    Pure per-occurrence diff: returns a list of issue dicts for this one
+    occurrence, each with a stable `key` (for cross-occurrence dedup) and a
+    `kind` (for pattern-matching in the aggregation pass). Never mutates
+    anything global — this function knows nothing about other occurrences.
+    """
+    issues = []
+    raw_event_name = occurrence["event_name"]
+    norm = normalize_key(raw_event_name)
+    match = spec_index.get(norm)
 
-    def record(key, **kwargs):
-        if key not in findings:
-            kwargs["occurrences_affected"] = 0
-            kwargs["example_source_ref"] = kwargs.get("source_ref")
-            findings[key] = kwargs
-        findings[key]["occurrences_affected"] += 1
+    if match is None:
+        issues.append({
+            "key": ("unrecognized_event", raw_event_name),
+            "kind": "unrecognized_event",
+            "event_name": raw_event_name,
+            "severity": NOTICE,
+            "scope": "event",
+            "parameter": None,
+            "issue": f"Event '{raw_event_name}' was not found in the tracking plan.",
+            "expected": "A matching event definition in the tracking plan.",
+            "suggested_fix": (
+                "If this is an intentional custom event, add it to your tracking plan so future audits "
+                "recognize it. If it's an unintended typo/variant of a known event, rename it to match."
+            ),
+        })
+        return raw_event_name, issues
 
-    for occurrence in observed_events:
-        raw_event_name = occurrence["event_name"]
-        events_seen.add(raw_event_name)
-        norm = normalize_key(raw_event_name)
-        match = spec_index.get(norm)
+    canonical_name, spec_entry = match
+    if raw_event_name != canonical_name:
+        issues.append({
+            "key": ("event_casing", raw_event_name, canonical_name),
+            "kind": "event_casing",
+            "event_name": raw_event_name,
+            "severity": NOTICE,
+            "scope": "event",
+            "parameter": None,
+            "issue": f"Event name '{raw_event_name}' drifts from the tracking plan's canonical '{canonical_name}'.",
+            "expected": canonical_name,
+            "suggested_fix": _fix_snippet_casing(raw_event_name, canonical_name, is_item=False),
+        })
 
-        if match is None:
-            key = ("unrecognized_event", raw_event_name)
-            record(
-                key,
-                event_name=raw_event_name,
-                severity=NOTICE,
-                scope="event",
-                parameter=None,
-                issue=f"Event '{raw_event_name}' was not found in the tracking plan.",
-                expected="A matching event definition in the tracking plan.",
-                observed=raw_event_name,
-                suggested_fix=(
-                    "If this is an intentional custom event, add it to your tracking plan so future audits "
-                    "recognize it. If it's an unintended typo/variant of a known event, rename it to match."
-                ),
-                source_ref=occurrence.get("source_ref"),
-            )
-            continue
+    issues.extend(
+        _diff_param_scope(canonical_name, spec_entry.get("params", {}), occurrence.get("params", {}), scope="event")
+    )
 
-        canonical_name, spec_entry = match
-        if raw_event_name != canonical_name:
-            key = ("event_casing", raw_event_name, canonical_name)
-            record(
-                key,
-                event_name=raw_event_name,
-                severity=NOTICE,
-                scope="event",
-                parameter=None,
-                issue=f"Event name '{raw_event_name}' drifts from the tracking plan's canonical '{canonical_name}'.",
-                expected=canonical_name,
-                observed=raw_event_name,
-                suggested_fix=_fix_snippet_casing(raw_event_name, canonical_name, is_item=False),
-                source_ref=occurrence.get("source_ref"),
-            )
+    item_spec = spec_entry.get("items", {})
+    if item_spec:
+        if occurrence.get("items"):
+            for item in occurrence["items"]:
+                issues.extend(_diff_param_scope(canonical_name, item_spec, item, scope="item"))
+        else:
+            required_item_params = {k: v for k, v in item_spec.items() if v.get("required", True)}
+            if required_item_params:
+                worst_tier = min((p["tier"] for p in required_item_params.values()), key=lambda t: _TIER_RANK[t])
+                missing_severity = CRITICAL if worst_tier == CRITICAL else NOTICE
+                worst_source = next(
+                    (p.get("tier_source", "") for p in required_item_params.values() if p["tier"] == worst_tier), ""
+                )
+                notes_caveat = (
+                    " (tier inferred from notes — verify)"
+                    if missing_severity == CRITICAL and "tier:notes_inferred" in worst_source
+                    else ""
+                )
+                issues.append({
+                    "key": ("missing_items_array", canonical_name),
+                    "kind": "missing_items_array",
+                    "event_name": canonical_name,
+                    "severity": missing_severity,
+                    "scope": "item",
+                    "parameter": None,
+                    "issue": f"'{canonical_name}' has no items[] array at all, but the tracking plan expects item-scoped parameters.{notes_caveat}",
+                    "expected": "A non-empty items[] array.",
+                    "suggested_fix": (
+                        f"Populate the `items[]` array on '{canonical_name}' with at least "
+                        f"{', '.join(required_item_params.keys())}."
+                    ),
+                })
 
-        _diff_param_scope(
-            occurrence, canonical_name, spec_entry.get("params", {}), occurrence.get("params", {}),
-            scope="event", record=record,
-        )
-
-        item_spec = spec_entry.get("items", {})
-        if item_spec:
-            if occurrence.get("items"):
-                for item in occurrence["items"]:
-                    _diff_param_scope(
-                        occurrence, canonical_name, item_spec, item, scope="item", record=record,
-                    )
-            else:
-                # Event has an item-scoped spec but no items array at all sent — flag once,
-                # based only on the item params that are actually required. If every
-                # item-scoped param in the spec is optional, there's nothing to flag.
-                required_item_params = {k: v for k, v in item_spec.items() if v.get("required", True)}
-                if required_item_params:
-                    worst_tier = min((p["tier"] for p in required_item_params.values()), key=lambda t: _TIER_RANK[t])
-                    key = ("missing_items_array", canonical_name)
-                    record(
-                        key,
-                        event_name=canonical_name,
-                        severity=worst_tier,
-                        scope="item",
-                        parameter=None,
-                        issue=f"'{canonical_name}' has no items[] array at all, but the tracking plan expects item-scoped parameters.",
-                        expected="A non-empty items[] array.",
-                        observed="items[] missing or empty",
-                        suggested_fix=(
-                            f"Populate the `items[]` array on '{canonical_name}' with at least "
-                            f"{', '.join(required_item_params.keys())}."
-                        ),
-                        source_ref=occurrence.get("source_ref"),
-                    )
-
-    findings_list = list(findings.values())
-    findings_list.sort(key=lambda f: (_TIER_RANK[f["severity"]], f["event_name"], f.get("parameter") or ""))
-
-    summary = {
-        "total_occurrences_analyzed": total_occurrences,
-        "distinct_events_seen": len(events_seen),
-        "critical_count": sum(1 for f in findings_list if f["severity"] == CRITICAL),
-        "warning_count": sum(1 for f in findings_list if f["severity"] == WARNING),
-        "notice_count": sum(1 for f in findings_list if f["severity"] == NOTICE),
-    }
-    return summary, findings_list
+    return canonical_name, issues
 
 
-def _diff_param_scope(occurrence, canonical_event_name, param_spec, observed_params, scope, record):
+def _diff_param_scope(canonical_event_name, param_spec, observed_params, scope):
+    """Pure per-occurrence, per-scope diff. Returns a list of issue dicts."""
+    issues = []
     observed_index = {normalize_key(k): (k, v) for k, v in (observed_params or {}).items()}
 
     for spec_param, rules in param_spec.items():
@@ -924,58 +1134,262 @@ def _diff_param_scope(occurrence, canonical_event_name, param_spec, observed_par
 
         if found is None:
             # required defaults to True when unset — a param with no explicit "required"
-            # is treated as expected-by-default, matching prior behavior for every
-            # existing spec entry. Only an explicit required: false skips the "missing"
-            # finding entirely, since some params (e.g. quantity on view_item) are
-            # legitimately optional and shouldn't nag on every audit that omits them.
+            # is treated as expected-by-default. Only an explicit required: false skips
+            # the "missing" finding entirely, since some params (e.g. quantity on
+            # view_item) are legitimately optional and shouldn't nag on every audit.
             if not rules.get("required", True):
                 continue
-            key = ("missing_param", canonical_event_name, scope, spec_param)
-            record(
-                key,
-                event_name=canonical_event_name,
-                severity=rules["tier"],
-                scope=scope,
-                parameter=spec_param,
-                issue=f"Missing {'item-scoped' if scope == 'item' else 'event-scoped'} parameter '{spec_param}'.",
-                expected=f"'{spec_param}' present ({rules['type']}).",
-                observed="absent",
-                suggested_fix=_fix_snippet_missing(canonical_event_name, scope, spec_param, rules["type"], scope == "item"),
-                source_ref=occurrence.get("source_ref"),
+            # Missing a CRITICAL-tier (truly load-bearing) param stays CRITICAL.
+            # Missing anything else (WARNING/NOTICE-tier — i.e. "recommended but
+            # not load-bearing") is downgraded to NOTICE: WARNING is reserved for
+            # something actually being wrong (a bad type), not merely absent.
+            missing_severity = CRITICAL if rules["tier"] == CRITICAL else NOTICE
+            tier_source = rules.get("tier_source", "")
+            notes_caveat = (
+                " (tier inferred from notes — verify)"
+                if missing_severity == CRITICAL and "tier:notes_inferred" in tier_source
+                else ""
             )
+            issues.append({
+                "key": ("missing_param", canonical_event_name, scope, spec_param),
+                "kind": "missing_param",
+                "event_name": canonical_event_name,
+                "severity": missing_severity,
+                "scope": scope,
+                "parameter": spec_param,
+                "issue": f"Missing {'item-scoped' if scope == 'item' else 'event-scoped'} parameter '{spec_param}'.{notes_caveat}",
+                "expected": f"'{spec_param}' present ({rules['type']}).",
+                "suggested_fix": _fix_snippet_missing(canonical_event_name, scope, spec_param, rules["type"], scope == "item"),
+            })
             continue
 
         observed_name, observed_value = found
         if observed_name != spec_param:
-            key = ("param_casing", canonical_event_name, scope, spec_param, observed_name)
-            record(
-                key,
-                event_name=canonical_event_name,
-                severity=NOTICE,
-                scope=scope,
-                parameter=spec_param,
-                issue=f"Parameter '{observed_name}' drifts from the tracking plan's canonical '{spec_param}'.",
-                expected=spec_param,
-                observed=observed_name,
-                suggested_fix=_fix_snippet_casing(observed_name, spec_param, is_item=(scope == "item")),
-                source_ref=occurrence.get("source_ref"),
-            )
+            issues.append({
+                "key": ("param_casing", canonical_event_name, scope, spec_param, observed_name),
+                "kind": "param_casing",
+                "event_name": canonical_event_name,
+                "severity": NOTICE,
+                "scope": scope,
+                "parameter": spec_param,
+                "issue": f"Parameter '{observed_name}' drifts from the tracking plan's canonical '{spec_param}'.",
+                "expected": spec_param,
+                "suggested_fix": _fix_snippet_casing(observed_name, spec_param, is_item=(scope == "item")),
+            })
 
         is_match, is_stringified_number = types_compatible(rules["type"], observed_value)
         if not is_match:
-            key = ("type_mismatch", canonical_event_name, scope, spec_param)
-            record(
-                key,
-                event_name=canonical_event_name,
-                severity=WARNING,
-                scope=scope,
-                parameter=spec_param,
-                issue=f"'{spec_param}' expected type {rules['type']}, got {python_type_name(observed_value)}.",
-                expected=rules["type"],
-                observed=f"{observed_value!r} ({python_type_name(observed_value)})",
-                suggested_fix=_fix_snippet_type(spec_param, rules["type"], observed_value, is_stringified_number),
-                source_ref=occurrence.get("source_ref"),
-            )
+            issues.append({
+                "key": ("type_mismatch", canonical_event_name, scope, spec_param),
+                "kind": "type_mismatch",
+                "event_name": canonical_event_name,
+                "severity": WARNING,
+                "scope": scope,
+                "parameter": spec_param,
+                # The actual bad value is folded directly into the issue text (rather than a
+                # separate "Observed" field) since it's the one piece of diagnostic detail
+                # that isn't already implied by "Issue"/"Expected" for every other issue kind.
+                "issue": f"'{spec_param}' expected type {rules['type']}, got {python_type_name(observed_value)} ({observed_value!r}).",
+                "expected": rules["type"],
+                "suggested_fix": _fix_snippet_type(spec_param, rules["type"], observed_value, is_stringified_number),
+                "_observed_value": observed_value,  # internal only, used to build merged fix blocks; stripped before output
+            })
+
+    return issues
+
+
+def _dedup_global_findings(occurrence_issues):
+    """Pass 2: the granular, deduplicated findings list (existing schema)."""
+    findings = OrderedDict()
+    for _occurrence, _canonical_name, issues in occurrence_issues:
+        for issue in issues:
+            key = issue["key"]
+            if key not in findings:
+                findings[key] = {
+                    "event_name": issue["event_name"],
+                    "severity": issue["severity"],
+                    "scope": issue["scope"],
+                    "parameter": issue["parameter"],
+                    "issue": issue["issue"],
+                    "expected": issue["expected"],
+                    "suggested_fix": issue["suggested_fix"],
+                    "occurrences_affected": 0,
+                }
+            findings[key]["occurrences_affected"] += 1
+    findings_list = list(findings.values())
+    findings_list.sort(key=lambda f: (_TIER_RANK[f["severity"]], f["event_name"], f.get("parameter") or ""))
+    return findings_list
+
+
+def _placeholder_for_type(type_name):
+    return f"<{type_name}>"
+
+
+def _js_literal(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if value is None:
+        return "null"
+    return json.dumps(str(value))
+
+
+def _merge_scope_fields(param_spec, observed_dict, missing_params, type_bad_params):
+    """
+    Build one merged field dict for a single scope (event or one item), combining:
+    valid observed values as-is, missing fields as typed placeholders, and
+    present-but-wrong-typed fields replaced with a corrected placeholder.
+    Genuinely optional-and-absent fields are simply left out.
+    """
+    observed_index = {normalize_key(k): (k, v) for k, v in (observed_dict or {}).items()}
+    merged = OrderedDict()
+    for spec_param, rules in param_spec.items():
+        norm_param = normalize_key(spec_param)
+        found = observed_index.get(norm_param)
+        if spec_param in type_bad_params:
+            merged[spec_param] = _placeholder_for_type(rules["type"])
+        elif spec_param in missing_params:
+            if not rules.get("required", True):
+                continue
+            merged[spec_param] = _placeholder_for_type(rules["type"])
+        elif found is not None:
+            merged[spec_param] = found[1]
+    return merged
+
+
+def _render_field_entries(fields):
+    rendered = []
+    for k, v in fields.items():
+        if isinstance(v, str) and v.startswith("<") and v.endswith(">"):
+            rendered.append(f"{k}: {v}")
+        else:
+            rendered.append(f"{k}: {_js_literal(v)}")
+    return rendered
+
+
+def _build_merged_fix_block(event_name, occurrence, issues, spec_index):
+    """
+    Build one ready-to-paste dataLayer.push block for this event/pattern, merging
+    valid fields (echoed from a representative real occurrence), missing fields
+    (added as typed placeholders), and wrong-typed fields (replaced with a
+    corrected placeholder) into a single multi-line JS block — covering event-scoped
+    fields, currency/value/transaction_id and friends, and a representative items[] entry.
+    """
+    match = spec_index.get(normalize_key(event_name))
+    param_spec = match[1].get("params", {}) if match else {}
+    item_spec = match[1].get("items", {}) if match else {}
+
+    missing_event_params = {
+        i["parameter"] for i in issues if i["kind"] == "missing_param" and i["scope"] == "event"
+    }
+    type_bad_event_params = {
+        i["parameter"] for i in issues if i["kind"] == "type_mismatch" and i["scope"] == "event"
+    }
+    missing_item_params = {
+        i["parameter"] for i in issues if i["kind"] == "missing_param" and i["scope"] == "item"
+    }
+    type_bad_item_params = {
+        i["parameter"] for i in issues if i["kind"] == "type_mismatch" and i["scope"] == "item"
+    }
+    if any(i["kind"] == "missing_items_array" for i in issues):
+        missing_item_params |= {p for p, r in item_spec.items() if r.get("required", True)}
+
+    event_fields = _merge_scope_fields(param_spec, occurrence.get("params", {}), missing_event_params, type_bad_event_params)
+
+    top_entries = [f"event: {json.dumps(event_name)}"]
+    top_entries.extend(_render_field_entries(event_fields))
+
+    if item_spec:
+        rep_items = occurrence.get("items") or [{}]
+        rep_item = rep_items[0] if rep_items else {}
+        item_fields = _merge_scope_fields(item_spec, rep_item, missing_item_params, type_bad_item_params)
+        item_entry_lines = [f"      {line}" for line in _render_field_entries(item_fields)]
+        if item_entry_lines:
+            items_block = "items: [\n    {\n" + ",\n".join(item_entry_lines) + "\n    }\n  ]"
+            top_entries.append(items_block)
+
+    body = ",\n  ".join(top_entries)
+    return f"dataLayer.push({{\n  {body}\n}});"
+
+
+def _build_event_reports(occurrence_issues, spec_index):
+    """
+    Pass 3: group occurrences by (event, exact set of issue keys triggered) into
+    one aggregated report per distinct breakage pattern, each with every issue for
+    that pattern listed together and a single merged fix block.
+    """
+    groups = OrderedDict()
+    for occurrence, canonical_name, issues in occurrence_issues:
+        issue_keys = frozenset(issue["key"] for issue in issues)
+        group_key = (canonical_name, issue_keys)
+        if group_key not in groups:
+            groups[group_key] = {
+                "event_name": canonical_name,
+                "occurrences_affected": 0,
+                "issues": issues,
+                "representative_occurrence": occurrence,
+            }
+        groups[group_key]["occurrences_affected"] += 1
+
+    reports = []
+    for group in groups.values():
+        issues = group["issues"]
+        if not issues:
+            continue  # a fully clean occurrence pattern — nothing to report
+        worst_severity = min((i["severity"] for i in issues), key=lambda t: _TIER_RANK[t])
+        fix_block = _build_merged_fix_block(
+            group["event_name"], group["representative_occurrence"] or {}, issues, spec_index
+        )
+        reports.append({
+            "event_name": group["event_name"],
+            "severity": worst_severity,
+            "occurrences_affected": group["occurrences_affected"],
+            "issue_count": len(issues),
+            "issues": [
+                {
+                    "severity": i["severity"],
+                    "scope": i["scope"],
+                    "parameter": i["parameter"],
+                    "issue": i["issue"],
+                    "expected": i["expected"],
+                }
+                for i in issues
+            ],
+            "suggested_fix": fix_block,
+        })
+
+    reports.sort(key=lambda r: (_TIER_RANK[r["severity"]], r["event_name"]))
+    return reports
+
+
+def diff_events(observed_events, spec):
+    spec_index = build_spec_index(spec)
+    total_occurrences = len(observed_events)
+    events_seen = set()
+
+    occurrence_issues = []  # list of (occurrence, canonical_event_name, issues) triples
+    for occurrence in observed_events:
+        events_seen.add(occurrence["event_name"])
+        canonical_name, issues = _diff_occurrence(occurrence, spec_index)
+        occurrence_issues.append((occurrence, canonical_name, issues))
+
+    findings = _dedup_global_findings(occurrence_issues)
+    event_reports = _build_event_reports(occurrence_issues, spec_index)
+
+    # Strip internal-only fields (e.g. _observed_value used for fix-block building)
+    # before anything gets serialized — they were never meant to leave this module.
+    for f in findings:
+        f.pop("_observed_value", None)
+
+    summary = {
+        "total_occurrences_analyzed": total_occurrences,
+        "distinct_events_seen": len(events_seen),
+        "critical_count": sum(1 for f in findings if f["severity"] == CRITICAL),
+        "warning_count": sum(1 for f in findings if f["severity"] == WARNING),
+        "notice_count": sum(1 for f in findings if f["severity"] == NOTICE),
+    }
+    return summary, findings, event_reports
 
 
 # ---------------------------------------------------------------------------
@@ -988,27 +1402,26 @@ _SEVERITY_FILL_COLORS = {
     NOTICE: "D1ECF1",    # light blue
 }
 
-_EXCEL_HEADERS = [
-    "Severity", "Event", "Scope", "Parameter", "Issue",
-    "Expected", "Observed", "Occurrences Affected", "Suggested Fix",
-]
-_EXCEL_COLUMN_WIDTHS = [10, 18, 8, 20, 42, 22, 26, 10, 55]
+_EXCEL_HEADERS = ["Severity", "Event", "Occurrences Affected", "Issues", "Suggested Fix"]
+_EXCEL_COLUMN_WIDTHS = [10, 20, 12, 60, 60]
 
 
-def write_excel_findings(findings, path):
+def write_excel_findings(event_reports, path):
     """
-    Write findings directly to an .xlsx workbook. This is entirely optional — the
-    primary contract of this script is the JSON output, and a calling Claude session
-    can always build a nicer-formatted workbook itself using its own xlsx tooling.
-    This exists for standalone/non-interactive use (e.g. a scheduled job in this repo's
-    broader data-quality suite) where nothing downstream will convert the JSON for you.
+    Write the aggregated per-event-pattern reports directly to an .xlsx workbook —
+    one row per distinct (event, issue-pattern) combination, matching the report
+    layer rather than the fully granular per-parameter findings list. This is
+    entirely optional — the JSON output already contains both views, and a calling
+    Claude session can always build a nicer-formatted workbook itself. This exists
+    for standalone/non-interactive use (e.g. a scheduled job in this repo's broader
+    data-quality suite) where nothing downstream will convert the JSON for you.
 
-    Only imports openpyxl when actually called, so requesting plain JSON output never
-    requires installing anything beyond the standard library.
+    Only imports openpyxl when actually called, so requesting plain JSON output
+    never requires installing anything beyond the standard library.
     """
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
+        from openpyxl.styles import Font, PatternFill, Alignment
     except ImportError:
         fail(
             "openpyxl is required to write an Excel findings workbook (--excel-output) but is not installed.",
@@ -1024,21 +1437,24 @@ def write_excel_findings(findings, path):
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
-    for finding in findings:
+    wrap = Alignment(wrap_text=True, vertical="top")
+    for report in event_reports:
+        issues_text = "\n".join(
+            f"[{i['severity']}] {i['scope']}/{i['parameter'] or '-'}: {i['issue']}" for i in report["issues"]
+        )
         ws.append([
-            finding.get("severity", ""),
-            finding.get("event_name", ""),
-            finding.get("scope", ""),
-            finding.get("parameter") or "",
-            finding.get("issue", ""),
-            finding.get("expected", ""),
-            finding.get("observed", ""),
-            finding.get("occurrences_affected", ""),
-            finding.get("suggested_fix", ""),
+            report.get("severity", ""),
+            report.get("event_name", ""),
+            report.get("occurrences_affected", ""),
+            issues_text,
+            report.get("suggested_fix", ""),
         ])
-        fill_color = _SEVERITY_FILL_COLORS.get(finding.get("severity"))
+        row = ws.max_row
+        for col in range(1, len(_EXCEL_HEADERS) + 1):
+            ws.cell(row=row, column=col).alignment = wrap
+        fill_color = _SEVERITY_FILL_COLORS.get(report.get("severity"))
         if fill_color:
-            ws.cell(row=ws.max_row, column=1).fill = PatternFill(
+            ws.cell(row=row, column=1).fill = PatternFill(
                 start_color=fill_color, end_color=fill_color, fill_type="solid"
             )
 
@@ -1077,15 +1493,15 @@ def main():
         "--format",
         required=False,
         default=None,
-        choices=["bq_json", "ga4_api_json", "gtm_preview_json", "tabular"],
+        choices=["bq_json", "ga4_api_json", "gtm_preview_json", "flat_json", "tabular"],
         help="Force the observed-data format instead of auto-detecting it.",
     )
     parser.add_argument(
         "--excel-output",
         required=False,
         default=None,
-        help="Optional path to also write findings as an .xlsx workbook directly (requires openpyxl). "
-             "Entirely optional — the JSON output already contains everything needed to build one elsewhere.",
+        help="Optional path to also write the aggregated event reports as an .xlsx workbook directly "
+             "(requires openpyxl). Entirely optional — the JSON output already contains everything needed.",
     )
     args = parser.parse_args()
 
@@ -1099,23 +1515,23 @@ def main():
             spec = load_default_spec()
             plan_source = "bundled_default"
 
-        summary, findings = diff_events(observed_events, spec)
+        summary, findings, event_reports = diff_events(observed_events, spec)
         summary["observed_data_format_detected"] = detected_format
         summary["tracking_plan_source"] = plan_source
 
-        result = {"summary": summary, "findings": findings}
+        result = {"summary": summary, "findings": findings, "event_reports": event_reports}
         output_text = json.dumps(result, indent=2, default=str)
 
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(output_text)
-            print(f"Wrote {len(findings)} findings to {args.output}", file=sys.stderr)
+            print(f"Wrote {len(findings)} findings ({len(event_reports)} aggregated event reports) to {args.output}", file=sys.stderr)
         else:
             print(output_text)
 
         if args.excel_output:
-            write_excel_findings(findings, args.excel_output)
-            print(f"Wrote {len(findings)} findings to {args.excel_output}", file=sys.stderr)
+            write_excel_findings(event_reports, args.excel_output)
+            print(f"Wrote {len(event_reports)} aggregated event reports to {args.excel_output}", file=sys.stderr)
 
     except AuditorError as e:
         emit_fatal_and_exit(e)
