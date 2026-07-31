@@ -1,8 +1,8 @@
 # GA4 Analytics Data Quality Suite
 
-A practical toolkit designed to find and fix common Google Analytics 4 (GA4) data issues—before and after you launch your campaigns.
+A practical toolkit designed to find, diagnose, and fix data quality issues across your entire Google Analytics 4 (GA4) ecosystem.
 
-Whether you are trying to figure out why traffic is landing in **Unassigned**, cleaning up dirty marketing links, or double-checking that your web analytics events are firing correctly, this suite automates the tedious cleanup work.
+Whether you are launching a new website feature, validating event tracking after a deployment, auditing GTM containers, or fixing broken marketing links, this suite automates the tedious verification work so your team can trust your reporting.
 
 ---
 
