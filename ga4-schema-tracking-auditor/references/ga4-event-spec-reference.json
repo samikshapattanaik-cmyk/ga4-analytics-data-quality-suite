@@ -1,1 +1,296 @@
 
+{
+  "_meta": {
+    "description": "Bundled default GA4 tracking spec used when the user has no tracking plan of their own. Mirrors ga4-event-spec-reference.md. tier is one of CRITICAL, WARNING, NOTICE. type is one of string, int, float, bool, any.",
+    "version": "1.0"
+  },
+  "events": {
+    "page_view": {
+      "category": "web analytics",
+      "params": {
+        "page_location": {"tier": "CRITICAL", "type": "string", "notes": "Full URL of the page. Missing this breaks Pages reports and Landing Page dimension."},
+        "page_title": {"tier": "WARNING", "type": "string", "notes": "Used for the Page Title dimension."},
+        "page_referrer": {"tier": "WARNING", "type": "string", "notes": "Used for referral/session-source attribution."},
+        "language": {"tier": "NOTICE", "type": "string", "notes": "Recommended for locale reporting."}
+      },
+      "items": {}
+    },
+    "generate_lead": {
+      "category": "web analytics",
+      "params": {
+        "value": {"tier": "CRITICAL", "type": "float", "notes": "Required for lead value/ROAS reporting."},
+        "currency": {"tier": "CRITICAL", "type": "string", "notes": "Required whenever value is sent; must be a valid ISO 4217 code (e.g. USD)."},
+        "form_id": {"tier": "WARNING", "type": "string", "notes": "Recommended so leads can be broken out by form."},
+        "form_name": {"tier": "WARNING", "type": "string", "notes": "Recommended for reporting on which form converted."},
+        "lead_source": {"tier": "NOTICE", "type": "string", "notes": "Custom but commonly used to segment lead channel."}
+      },
+      "items": {}
+    },
+    "sign_up": {
+      "category": "web analytics",
+      "params": {
+        "method": {"tier": "WARNING", "type": "string", "notes": "e.g. 'Google', 'email' -- lets you compare signup methods."}
+      },
+      "items": {}
+    },
+    "login": {
+      "category": "web analytics",
+      "params": {
+        "method": {"tier": "WARNING", "type": "string", "notes": "e.g. 'Google', 'email'."}
+      },
+      "items": {}
+    },
+    "search": {
+      "category": "web analytics",
+      "params": {
+        "search_term": {"tier": "CRITICAL", "type": "string", "notes": "Without this the event carries no analytical value and Search Terms report is empty."}
+      },
+      "items": {}
+    },
+    "view_search_results": {
+      "category": "web analytics",
+      "params": {
+        "search_term": {"tier": "CRITICAL", "type": "string", "notes": "Same requirement as search."}
+      },
+      "items": {}
+    },
+    "file_download": {
+      "category": "web analytics",
+      "params": {
+        "file_name": {"tier": "CRITICAL", "type": "string", "notes": "Required to identify which file was downloaded."},
+        "file_extension": {"tier": "WARNING", "type": "string", "notes": "Recommended for breakdowns by file type (pdf, docx, etc)."},
+        "link_url": {"tier": "NOTICE", "type": "string", "notes": "Full URL of the downloaded file."},
+        "link_text": {"tier": "NOTICE", "type": "string", "notes": "Anchor text of the download link."}
+      },
+      "items": {}
+    },
+    "click": {
+      "category": "web analytics",
+      "params": {
+        "link_url": {"tier": "CRITICAL", "type": "string", "notes": "Required to know what was clicked, especially for outbound link tracking."},
+        "link_domain": {"tier": "WARNING", "type": "string", "notes": "Recommended for outbound click reporting."},
+        "outbound": {"tier": "WARNING", "type": "bool", "notes": "Recommended boolean flag distinguishing outbound vs internal clicks."}
+      },
+      "items": {}
+    },
+    "video_start": {
+      "category": "web analytics",
+      "params": {
+        "video_title": {"tier": "WARNING", "type": "string"},
+        "video_url": {"tier": "NOTICE", "type": "string"},
+        "video_provider": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {}
+    },
+    "video_progress": {
+      "category": "web analytics",
+      "params": {
+        "video_title": {"tier": "WARNING", "type": "string"},
+        "video_percent": {"tier": "WARNING", "type": "int"}
+      },
+      "items": {}
+    },
+    "video_complete": {
+      "category": "web analytics",
+      "params": {
+        "video_title": {"tier": "WARNING", "type": "string"}
+      },
+      "items": {}
+    },
+    "form_start": {
+      "category": "web analytics",
+      "params": {
+        "form_id": {"tier": "WARNING", "type": "string"},
+        "form_name": {"tier": "WARNING", "type": "string"}
+      },
+      "items": {}
+    },
+    "form_submit": {
+      "category": "web analytics",
+      "params": {
+        "form_id": {"tier": "WARNING", "type": "string"},
+        "form_name": {"tier": "WARNING", "type": "string"},
+        "form_submit_text": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {}
+    },
+    "scroll": {
+      "category": "web analytics",
+      "params": {
+        "percent_scrolled": {"tier": "WARNING", "type": "int"}
+      },
+      "items": {}
+    },
+    "view_item_list": {
+      "category": "ecommerce",
+      "params": {
+        "item_list_id": {"tier": "WARNING", "type": "string"},
+        "item_list_name": {"tier": "WARNING", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string", "notes": "At least one of item_id or item_name is required; treat as critical if both are absent."},
+        "item_category": {"tier": "WARNING", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "index": {"tier": "NOTICE", "type": "int"}
+      }
+    },
+    "select_item": {
+      "category": "ecommerce",
+      "params": {
+        "item_list_id": {"tier": "WARNING", "type": "string"},
+        "item_list_name": {"tier": "WARNING", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "item_category": {"tier": "WARNING", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"}
+      }
+    },
+    "view_item": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "CRITICAL", "type": "string", "notes": "Required whenever value is present."},
+        "value": {"tier": "WARNING", "type": "float"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "item_category": {"tier": "WARNING", "type": "string"},
+        "price": {"tier": "CRITICAL", "type": "float"},
+        "item_brand": {"tier": "NOTICE", "type": "string"},
+        "quantity": {"tier": "WARNING", "type": "int", "required": false, "notes": "Not required to view an item, but many ecommerce platforms pass a default quantity here anyway — checked for type only if present."}
+      }
+    },
+    "add_to_wishlist": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "WARNING", "type": "string"},
+        "value": {"tier": "WARNING", "type": "float"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int", "required": false, "notes": "Not required to wishlist an item, but checked for type only if the platform passes it anyway."}
+      }
+    },
+    "add_to_cart": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "CRITICAL", "type": "string"},
+        "value": {"tier": "CRITICAL", "type": "float", "notes": "Required to compute cart value / abandon-cart reporting."}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "item_category": {"tier": "WARNING", "type": "string"},
+        "price": {"tier": "CRITICAL", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "remove_from_cart": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "WARNING", "type": "string"},
+        "value": {"tier": "WARNING", "type": "float"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "view_cart": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "WARNING", "type": "string"},
+        "value": {"tier": "WARNING", "type": "float"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "begin_checkout": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "CRITICAL", "type": "string"},
+        "value": {"tier": "CRITICAL", "type": "float", "notes": "Required for checkout funnel value reporting."},
+        "coupon": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "CRITICAL", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "add_shipping_info": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "WARNING", "type": "string"},
+        "value": {"tier": "WARNING", "type": "float"},
+        "shipping_tier": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "add_payment_info": {
+      "category": "ecommerce",
+      "params": {
+        "currency": {"tier": "WARNING", "type": "string"},
+        "value": {"tier": "WARNING", "type": "float"},
+        "payment_type": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "price": {"tier": "WARNING", "type": "float"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    },
+    "purchase": {
+      "category": "ecommerce",
+      "params": {
+        "transaction_id": {"tier": "CRITICAL", "type": "string", "notes": "Missing this causes duplicate/undercounted revenue and breaks dedup logic."},
+        "value": {"tier": "CRITICAL", "type": "float", "notes": "Required for revenue reporting; must be numeric, not a currency-formatted string."},
+        "currency": {"tier": "CRITICAL", "type": "string", "notes": "Required whenever value is sent."},
+        "tax": {"tier": "WARNING", "type": "float"},
+        "shipping": {"tier": "WARNING", "type": "float"},
+        "coupon": {"tier": "NOTICE", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "CRITICAL", "type": "string"},
+        "item_category": {"tier": "WARNING", "type": "string"},
+        "price": {"tier": "CRITICAL", "type": "float"},
+        "quantity": {"tier": "CRITICAL", "type": "int", "notes": "Missing quantity silently distorts revenue-per-item calculations."},
+        "item_brand": {"tier": "NOTICE", "type": "string"},
+        "item_variant": {"tier": "NOTICE", "type": "string"},
+        "coupon": {"tier": "NOTICE", "type": "string"}
+      }
+    },
+    "refund": {
+      "category": "ecommerce",
+      "params": {
+        "transaction_id": {"tier": "CRITICAL", "type": "string", "notes": "Required to tie the refund back to the original purchase."},
+        "value": {"tier": "WARNING", "type": "float"},
+        "currency": {"tier": "WARNING", "type": "string"}
+      },
+      "items": {
+        "item_id": {"tier": "WARNING", "type": "string"},
+        "item_name": {"tier": "WARNING", "type": "string"},
+        "quantity": {"tier": "WARNING", "type": "int"}
+      }
+    }
+  }
+}
