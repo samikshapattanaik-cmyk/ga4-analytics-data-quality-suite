@@ -65,14 +65,16 @@ Render the findings directly in the conversation — don't make the user open a 
 [N] URLs checked · [X] 🔴 Critical · [Y] 🟡 Warning · [Z] 🔵 Notice · [W] clean
 
 ## 🔴 Critical
-- **[id/short URL]** — [issue]. Fix: [what needs to happen, e.g. "replace {source_name} with the actual source"]
+- **[id/short URL]** — [issue]. Fix: [what needs to happen, e.g. "replace {source_name} with the actual source" or "add a utm_source — none was provided"]
 
 ## 🟡 Warning
-- **[id/short URL]** — [issue] → corrected to `[value]`
+- **[id/short URL]** — [issue] → corrected to `[value]`, or "needs manual input" if the script's `corrected_url` for that row is null
 
 ## 🔵 Notice
 - **[id/short URL]** — [issue] → corrected to `[value]`
 ```
+
+Warning and Notice rows almost always have a real `corrected_url` (casing/synonym/encoding fixes are unambiguous), but on the rare row where one of these tiers coincides with a missing required value, say so plainly rather than implying a fix was made — never show the original URL back as if it were the correction.
 
 Group by tier, most severe first. For each finding, state the specific parameter and value, not just "this URL has an issue." If a tier has zero findings, say so briefly rather than omitting the section — the user should be able to tell at a glance that nothing critical is lurking. Keep this conversational and scannable; save the exhaustive row-by-row detail for the Excel file in Step 5.
 
@@ -88,7 +90,13 @@ Build a workbook from the script's JSON output with (at minimum) these columns:
 | Original URL | as provided |
 | Severity | worst tier found for that row, or "OK" |
 | Issues | one-line, semicolon-separated summary of every issue on that row |
-| Corrected URL | the script's fixed URL, ready to copy-paste; blank/flagged where a human decision is required (e.g. an unfilled template tag) |
+| Corrected URL | the script's `corrected_url` value, ready to copy-paste. The script already leaves this **blank (null)** — not a copy of the original — for any row where nothing could be responsibly auto-fixed (a missing required value, or an unfilled template tag), since a "corrected" URL identical to the original reads as a failed fix rather than an honest "this needs a human to fill something in." Render null as an empty cell, or a short note like "— needs manual input —" if you want it to stand out; don't fall back to writing the original URL there. |
+
+**Formatting — required, not optional:** long URLs and multi-issue rows will overflow their column width and get hard-clipped by neighboring non-empty cells rather than showing "…", which makes every row look identical when several rows share a long common prefix (e.g. the same domain and path). To avoid this:
+- Set generous column widths on Original URL, Issues, and Corrected URL (40–60 characters is usually enough).
+- Turn on wrap-text alignment for those same columns, and set row height to auto or a fixed value tall enough for 2–3 lines, so the full content is visible without clicking into each cell.
+- Freeze the header row.
+- Keep the severity emoji paired with its text label (already the case above) — some spreadsheet viewers (notably Google Drive's inline preview) don't render color emoji and fall back to a placeholder box, so the text label is what actually carries the meaning if that happens.
 
 Sort rows Critical → Warning → Notice → OK so the highest-priority fixes are at the top. Save the file and share it with `present_files` alongside the in-chat report — the user needs both the quick read and the working file.
 
