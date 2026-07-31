@@ -7,11 +7,13 @@ description: Audits GA4 event tracking for drift against a tracking plan—catch
 
 This skill compares observed GA4 events against a reference tracking plan, reporting gaps according to three severity tiers:
 
-- 🔴 **CRITICAL:** Missing mandatory event/parameter required for core GA4 processing or revenue reporting.
-- 🟡 **WARNING:** Data type mismatch or missing optional/recommended parameter.
-- 🔵 **NOTICE:** Naming/casing drift that fragments reports without outright breaking tracking.
+- 🔴 **CRITICAL:** A load-bearing event/parameter is missing (breaks core GA4 processing or revenue reporting), or a load-bearing parameter's item-array is missing entirely.
+- 🟡 **WARNING:** A parameter is present but wrong — a data type mismatch (e.g. `"49.99"` instead of `49.99`). WARNING is reserved for something actually being wrong, never for a parameter simply being absent.
+- 🔵 **NOTICE:** Either a recommended-but-not-load-bearing parameter is absent, or naming/casing drift is fragmenting reports (e.g. `pageLocation` vs `page_location`). Absence of anything non-critical is deliberately kept at this lower tier so the report stays focused on real problems instead of nagging about every optional field a legitimate implementation chose to skip.
 
-All parsing, unnesting, and diffing logic is executed deterministically via `scripts/validate_schema.py`.
+All parsing, unnesting, and diffing logic is executed deterministically via `scripts/validate_schema.py`, which emits two views of the same findings:
+- **`findings`** — granular, one entry per (event, scope, parameter, issue), for anyone who wants full detail.
+- **`event_reports`** — aggregated one row per distinct (event, issue-pattern) combination, each bundling every issue for that pattern together with a single ready-to-paste `dataLayer.push` fix block. **This is the view to build the in-chat report and Excel workbook from.**
 
 ---
 
@@ -21,7 +23,7 @@ All parsing, unnesting, and diffing logic is executed deterministically via `scr
 
 Before executing the script, confirm the input sources with the user:
 
-1. **Tracking Plan:** "Do you have your own tracking plan (Google Sheets paste, CSV, Excel, or JSON), or should I use the bundled GA4 default spec covering standard web and ecommerce events?"
+1. **Tracking Plan:** "Do you have your own tracking plan (Sheets/CSV/Excel/JSON), or should I use the bundled GA4 default spec? No `tier`/`required` columns needed — I'll infer those. Add them yourself if you want tighter control over what counts as CRITICAL vs optional."
 2. **Observed Data:** "Is your observed export attached/pasted directly, or are we connecting to a database/warehouse (e.g., BigQuery)?"
    - *Note for BigQuery/Warehouses:* Ask the user to confirm the exact project/dataset/table name and column mappings for `event_name`, `event_params`, and `items` before querying.
 
@@ -42,50 +44,57 @@ python3 scripts/validate_schema.py --observed <PATH_TO_OBSERVED_DATA> [--trackin
 ```
 
 - Omit `--tracking-plan` to fall back to the bundled default spec (`references/ga4-default-spec.json`).
-- The script auto-detects the observed data format: BigQuery-style export (rows with `event_name`/`event_params`/`items`), GTM Preview/dataLayer JSON dump, GA4 Data API JSON pull (rows + dimensionHeaders), or tabular CSV/TSV/Excel. If detection isn't confident, it exits with an error instead of guessing—pass `--format bq_json`, `--format gtm_preview_json`, `--format ga4_api_json`, or `--format tabular` to force it.
+- The script auto-detects the observed data format across **five** shapes: BigQuery-style export (rows with `event_params`/`items` array structs), GTM Preview/dataLayer JSON dump (`{event: ..., ecommerce: {...}}`), **flat gtag.js-style event capture** (`{event_name: ..., ...flat params..., items: [...]}` with no wrapper — the natural output of tools that intercept and log raw `gtag('event', ...)` calls), GA4 Data API JSON pull (rows + dimensionHeaders), or tabular CSV/TSV/Excel. If detection isn't confident, it exits with an error instead of guessing—pass `--format bq_json`, `--format gtm_preview_json`, `--format flat_json`, `--format ga4_api_json`, or `--format tabular` to force it.
 - **Dependencies:** JSON, JSONL, CSV, and TSV need nothing beyond the Python standard library—this covers every Google Sheets export, since Sheets always downloads as CSV/TSV. `pandas` + `openpyxl` are only imported, and only needed, when the file is a genuine binary Excel workbook (`.xlsx`/`.xls`). If the script reports them missing for an Excel input, the simplest fix is usually to ask the user to re-export the same file as CSV instead (Google Sheets/Excel: File > Download > CSV)—no dependency involved. If they specifically need the Excel file read as-is, install the two packages using whatever approach fits the environment (a virtualenv, `pip install pandas openpyxl`, or that same command with `--break-system-packages` if the environment's Python blocks unmanaged installs) and retry once.
-- If a custom tracking plan is supplied, it needs at minimum an `event_name` column and a `param_name` column (CSV/TSV/Excel), or an equivalent flat JSON list of records. Optional columns: `scope` (`event`|`item`, defaults to `event`), `tier` (`CRITICAL`|`WARNING`|`NOTICE`, defaults to `WARNING`), `data_type` (`string`|`int`|`float`|`bool`, defaults to `any`), `notes`, `required` (`true`|`false`, defaults to `true` — set to `false` for a parameter that's fine to omit but should still be checked for type/casing when it happens to be present, e.g. `quantity` on `view_item`). If column names or layout are ambiguous, confirm the mapping with the user rather than guessing—a wrong guess silently changes which issues get flagged as CRITICAL vs WARNING.
+- **Custom tracking plan columns:** at minimum an `event_name` column and a `param_name` column (aliases `parameter`/`param`/`parameter_name` are also recognized), or an equivalent flat JSON list of records. Optional columns: `scope`/`parameter_scope` (`event`|`item`, defaults to `event`), `data_type`/`parameter_type` (`string`|`int`|`float`|`bool`, defaults to `any`), `notes`/`description`, `tier` (`CRITICAL`|`WARNING`|`NOTICE`), `required` (`true`|`false`).
+- **Tier/required are almost never mandatory columns** — most real-world tracking plans (a marketing-authored Sheet, for instance) don't have them at all. When either is left unset for a parameter, the script resolves it through a 3-layer fallback, in priority order: **(1)** the plan's own explicit `tier`/`required` column, if present; **(2)** a matching event+parameter entry in the bundled default GA4 spec, borrowing its tier/required (real curated data, not a guess — why an ordinary Sheets export with just event/param/description columns still comes out sensibly tiered); **(3)** cautious keyword inference from the `notes`/`description` column as a last resort — looking for "required"/"mandatory" (checking first for negation like "not required" or the word "optional"), and inferring CRITICAL when the note also signals real severity ("critical", "high impact", "breaks reporting/revenue"). Any CRITICAL finding resolved this way is automatically flagged inline as "(tier inferred from notes — verify)" — no extra step needed on your end.
+- This fallback logic only applies to the CSV/TSV/Excel/flat-JSON-record tracking plan shapes. If a user hands you the native `{"events": {...}}` JSON shape (matching the bundled spec's own format), it's taken as fully-specified as written — no inference layered on top.
 
 ### Step 4: Render the In-Chat Markdown Report
 
-Read the JSON findings and render an in-chat report, grouped by severity then by event:
+Read the JSON's `event_reports` (not the granular `findings`) and render an in-chat report, one block per event, grouped by severity:
 
 ```markdown
 # GA4 Tracking Audit
 
 **Tracking plan:** [bundled default | user's plan, named]
-**Observed data:** [format detected, e.g. "BigQuery export, 3 event types"]
+**Observed data:** [format detected, e.g. "flat gtag.js capture, 3 event types"]
 **Totals:** 🔴 N critical · 🟡 N warning · 🔵 N notice
 
-## 🔴 Critical
-- **`purchase`** — missing `quantity` on N item(s)
-  Fix: `<suggested_fix from JSON>`
+## 🔴 purchase — 1 occurrence affected
+- Missing `transaction_id`, `currency` (event-scoped)
+- Missing `item_name` (item-scoped)
+- `price` sent as string ("149.00") instead of a number
 
-## 🟡 Warning
-...
+**Fix:**
+```js
+<suggested_fix from the event_reports entry>
+```
 
-## 🔵 Notice
+## 🔵 page_view — 1 occurrence affected
 ...
 ```
 
-Use each finding's `suggested_fix` field verbatim (or lightly cleaned up) as the copy-pasteable GTM variable/dataLayer snippet—don't invent fix language that contradicts what the script computed. When `occurrences_affected` is greater than 1, state the count (e.g. "affects 214 of 340 purchase events") so the user can tell a one-off from a systemic tagging bug. Keep this report conversational and scannable, since it's a chat response rather than a document.
+Use each event report's `suggested_fix` block verbatim (or lightly reformatted) as the copy-pasteable `dataLayer.push` fix — it already merges valid observed values, missing-field placeholders, and corrected replacements for wrong-typed fields into one block, so don't reconstruct it by hand from the individual issues. When `occurrences_affected` is greater than 1, state the count (e.g. "affects 214 of 340 purchase events") so the user can tell a one-off from a systemic tagging bug. A CRITICAL finding whose tier came from notes-inference already carries a "(tier inferred from notes — verify)" caveat in its issue text — just pass it through as-is. Keep this report conversational and scannable, since it's a chat response rather than a document.
 
 ### Step 5: Generate the Excel Findings Workbook
 
 You have two ways to produce this, and either is fine:
 
-- **Build it yourself** using `openpyxl`/`pandas` and whatever xlsx-authoring guidance your environment provides — this gives you full control over formatting and is the better choice when you're already presenting the workbook back through this environment.
-- **Let the script write it directly** by re-running Step 3 with `--excel-output <path>` (e.g. `--excel-output /tmp/findings.xlsx`). This produces a workbook with the same columns below, color-coded by severity, and needs only `openpyxl` (not `pandas`). This is the simpler option for non-interactive or standalone runs of this script.
+- **Build it yourself** from `event_reports` using `openpyxl`/`pandas` and whatever xlsx-authoring guidance your environment provides — this gives you full control over formatting and is the better choice when you're already presenting the workbook back through this environment.
+- **Let the script write it directly** by re-running Step 3 with `--excel-output <path>` (e.g. `--excel-output /tmp/findings.xlsx`). This produces a workbook from `event_reports` with the columns below, color-coded by severity, and needs only `openpyxl` (not `pandas`). This is the simpler option for non-interactive or standalone runs of this script.
 
-Either way, the workbook should have one row per finding, with columns:
+Either way, the workbook should have **one row per aggregated event report** (not one row per individual parameter issue), with columns:
 
-`Severity | Event | Scope | Parameter | Issue | Expected | Observed | Occurrences Affected | Suggested Fix`
+`Severity | Event | Occurrences Affected | Issues | Suggested Fix`
 
-Preserve the CRITICAL → WARNING → NOTICE ordering already present in the JSON. Save the file to whatever output location or working directory your environment uses for user-facing deliverables, and deliver it however that environment surfaces files to the user (a download link, a file-share tool, or just the file path)—alongside the Markdown report, so the user gets both the fast in-chat read and a shareable, sortable artifact for their team.
+Where "Issues" is every issue for that event/pattern listed together (e.g. as newline-separated bullets), and "Suggested Fix" is the single merged `dataLayer.push` block. Preserve the CRITICAL → WARNING → NOTICE ordering already present in the JSON. Save the file to whatever output location or working directory your environment uses for user-facing deliverables, and deliver it however that environment surfaces files to the user (a download link, a file-share tool, or just the file path)—alongside the Markdown report, so the user gets both the fast in-chat read and a shareable, sortable artifact for their team.
+
+If someone specifically wants the fully granular, one-row-per-parameter view instead (e.g. for further programmatic filtering), build it from the JSON's `findings` array — it's still there, unchanged in shape from before, just no longer the primary view for the human-facing report.
 
 ---
 
 ## Reference Files
 
 - `references/ga4-event-spec-reference.md` — Human-readable documentation of the full bundled default spec: every event, parameter, tier, and the reasoning behind each tier. Read this when the user asks *why* something is tiered a certain way, or wants help extending the default spec with a custom event.
-- `references/ga4-default-spec.json` — Machine-readable twin of the above that `scripts/validate_schema.py` actually loads at runtime. Keep both files in sync if either is edited.
+- `references/ga4-default-spec.json` — Machine-readable twin of the above that `scripts/validate_schema.py` actually loads at runtime (and also uses as layer 2 of the tracking-plan fallback described in Step 3). Keep both files in sync if either is edited.
