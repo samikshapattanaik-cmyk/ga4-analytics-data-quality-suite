@@ -1,4 +1,3 @@
-
 ---
 name: ga4-schema-tracking-auditor
 description: Audits GA4 event tracking for drift against a tracking plan—catches missing required parameters, data type mismatches (e.g. "49.99" instead of 49.99), and casing drift (e.g. pageLocation vs page_location) across both standard web analytics events (page_view, generate_lead, sign_up, search, login, file_download) and ecommerce events (view_item, add_to_cart, begin_checkout, purchase), including item-scoped parameters inside the items[] array. Use this whenever the user wants to QA, validate, or audit their GA4 tracking implementation, check a GA4 BigQuery export, GTM Preview dump, Data API pull, or tracking plan spreadsheet for tagging errors, investigate why GA4 reports look fragmented or incomplete, or reconcile an analytics tracking plan against production data.
