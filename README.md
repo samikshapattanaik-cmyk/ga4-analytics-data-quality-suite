@@ -32,7 +32,7 @@ Compares actual website data (from Google Tag Manager, BigQuery, or GA4 exports)
 
 ---
 
-## 🚦 How Issues Are Categorized
+## How Issues Are Categorized
 
 Both tools organize findings into three simple levels so you know what to fix first:
 
